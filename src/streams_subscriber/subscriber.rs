@@ -3,11 +3,12 @@
 //!
 use crate::streams_subscriber::random_seed;
 
-use iota_streams::app::transport::tangle::{client::Client, PAYLOAD_BYTES};
+use iota_streams::app::transport::tangle::client::{{Client,SendOptions},iota_client::Client as OtherClient};
 use iota_streams::app_channels::api::tangle::{Address, Subscriber};
-
+use iota_streams::app::transport::tangle::{ TangleAddress};
+use futures::executor::block_on;
 use base64::{decode_config, URL_SAFE_NO_PAD};
-
+use std::str::FromStr;
 use anyhow::Result;
 
 ///
@@ -25,8 +26,8 @@ impl Channel {
     /// Initialize the subscriber
     ///
     pub fn new(
-        node: String,
-        channel_address: String,
+        node: &str,
+        channel_address: &str,
         announcement_tag: String,
         seed_option: Option<String>,
     ) -> Channel {
@@ -34,40 +35,55 @@ impl Channel {
             Some(seed) => seed,
             None => random_seed(),
         };
-        let client: Client = Client::new_from_url(&node);
-        let subscriber = Subscriber::new(&seed, "utf-8", PAYLOAD_BYTES, client);
+
+        let send_options: SendOptions = SendOptions {
+          url: node.to_string(),
+          local_pow: false,
+        };
+      
+        let iota_client = block_on(
+          OtherClient::builder()
+            .with_node(&node)
+            .unwrap()
+            .with_local_pow(false)
+            .finish(),
+        )
+        .unwrap();
+        let client = Client::new(send_options, iota_client);
+        // let client: Client = Client::new_from_url(&node);
+        let subscriber = Subscriber::new(&seed, client);
 
         Self {
             subscriber: subscriber,
-            announcement_link: Address::from_str(&channel_address, &announcement_tag).unwrap(),
+            announcement_link: TangleAddress::from_str(&(channel_address.to_string()+ &":".to_string() + &announcement_tag)).unwrap(),
             subscription_link: Address::default(),
-            channel_address: channel_address,
+            channel_address: channel_address.to_string(),
         }
     }
 
     ///
     /// Connect
     ///
-    pub fn connect(&mut self) -> Result<String> {
+    pub async fn connect(&mut self) -> Result<String> {
         self.subscriber
-            .receive_announcement(&self.announcement_link)?;
+            .receive_announcement(&self.announcement_link).await.unwrap();
         Ok(self.subscription_link.msgid.to_string())
     }
     ///
     /// Read signed packet
     ///
-    pub fn read_signed(
+    pub async fn read_signed(
         &mut self,
         signed_packet_tag: String,
     ) -> Result<Vec<(Option<String>, Option<String>)>> {
         let mut response: Vec<(Option<String>, Option<String>)> = Vec::new();
 
-        let link = Address::from_str(&self.channel_address, &signed_packet_tag).unwrap();
-
-        let (_, public_payload, _) = self.subscriber.receive_signed_packet(&link)?;
+        let link = TangleAddress::from_str(&(self.channel_address.to_string()+ &":".to_string() + &signed_packet_tag)).unwrap();
+        println!("link: {}",link);
+        let (_, _, masked_payload) = self.subscriber.receive_signed_packet(&link).await.unwrap();
         response.push((
-            unwrap_data(&String::from_utf8(public_payload.0).unwrap()).unwrap(),
-            None, //Iot2Tanagle currently only support public masseges
+            None,
+            unwrap_data(&String::from_utf8(masked_payload.0.to_vec()).unwrap()).unwrap(), //Iot2Tanagle currently only support public masseges
         ));
 
         Ok(response)
@@ -76,17 +92,17 @@ impl Channel {
     ///
     /// Generates the next message in the channels
     ///
-    pub fn get_next_message(&mut self) -> Option<Vec<String>> {
+    pub async fn get_next_message(&mut self) -> Option<Vec<String>> {
         let mut ids: Vec<String> = vec![];
 
-        let mut msgs = self.subscriber.fetch_next_msgs();
+        let mut msgs = self.subscriber.fetch_next_msgs().await;
 
         for msg in &msgs {
             ids.push(msg.link.msgid.to_string());
         }
 
         while !msgs.is_empty() {
-            msgs = self.subscriber.fetch_next_msgs();
+            msgs = self.subscriber.fetch_next_msgs().await;
 
             for msg in &msgs {
                 ids.push(msg.link.msgid.to_string());
